@@ -202,8 +202,8 @@ const DB = {
    Cada cambio local se apunta en SY.meta ("tienda|id" → {u: fecha, p: pendiente de subir, d: borrado}).
    Al sincronizar: se bajan los cambios de la nube (gana el más reciente) y se suben los pendientes.
    Todo viaja cifrado con AES-GCM con una clave derivada de tu contraseña: el servidor no puede leerlo. */
-const SUPA_URL = '', SUPA_KEY = '';
-const SUPA_JS = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js';
+const SUPA_URL = 'https://sogsdsxmutkdiewdcweu.supabase.co', SUPA_KEY = 'sb_publishable_bCm8yvmE6kFpF1Ovh9lOow_6ZHXo8JX'; // clave pública (segura con RLS)
+const SUPA_JS = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.0/dist/umd/supabase.min.js';
 const SYNCED = ['cats', 'movs', 'nominas', 'files'];
 const SY = { meta: {}, last: 0, client: null, user: null, key: null, email: '', busy: false, again: false, timer: null, mt: null, status: '', err: '', lastOk: 0 };
 const RAW = { put: DB.put.bind(DB), del: DB.del.bind(DB), clear: DB.clear.bind(DB), putMany: DB.putMany.bind(DB) };
