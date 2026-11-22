@@ -655,6 +655,8 @@ function parsePayslip(text) {
       stop = true; continue;
     }
     if (/^fecha|sello empresa|banco:|determinacion de las bases|aportacion empresa|^base sujeta/.test(l)) { stop = true; continue; }
+    // Fila de totales al pie de cada hoja (REM. TOTAL, BASES, T. DEVENGADO…): el OCR la lee como basura con importes; se ignora
+    if (/sigue en (la )?siguiente|rem\.? ?total|t\.? ?devengado|t\.? ?a deducir|percepciones (no )?salariales/.test(l)) { stop = true; continue; }
     if (stop || !/[a-z]{3,}/.test(l) || /total|^base|^rem\.|n\.?i\.?f|c\.?i\.?f|afiliacion/.test(l)) continue;
     const am = amountsOf(raw); if (!am.length) continue;
     const amount = am[am.length - 1];
@@ -662,15 +664,24 @@ function parsePayslip(text) {
     let concept = raw.replace(PCT_RE, ' ').replace(MONEY_RE, ' ').replace(/[|*_]/g, ' ').replace(/^[\s\d.,\-]+/, '').replace(/\s+/g, ' ').trim();
     concept = concept ? concept[0].toUpperCase() + concept.slice(1).toLowerCase() : 'Concepto';
     let kind;
-    if (/especie/.test(l)) kind = 'espded';
-    else if (/embargo/.test(l)) kind = 'emb';
+    if (/(imp\.? ?ingr|ingreso a cuenta).*(cgo|cargo)\.? ?(de )?(la )?emp/.test(l)) kind = 'dev'; // ingreso a cuenta que paga la empresa: suma al bruto
     else if (/irpf|i\.r\.p\.f|tributacion|retencion|imp\.? ?ingr|ingreso a cuenta/.test(l)) kind = 'irpf';
+    else if (/especie/.test(l)) kind = 'espded';
+    else if (/embargo/.test(l)) kind = 'emb';
     else if (/cotizacion|contingencias|desempleo|formacion prof|equidad|\bmei\b/.test(l)) { if (pct && pct > 5) continue; kind = 'ss'; } // >5 % es la parte de la empresa
     else if (/pension|aport/.test(l)) kind = 'aho';
     else if (/anticipo|sindical|prestamo|descuento|dcto|^-/.test(l)) kind = 'otra';
     else kind = /insurance|seguro|med ins|medic|salud|dental|ticket|restaur|comedor|guarder|life|vida|sacrif|flex|especie/.test(l) ? 'esp' : 'dev';
     const key = norm(concept) + '|' + amount; if (seen.has(key)) continue; seen.add(key);
     lines.push({ concept, kind, amount, cat: kind === 'esp' ? espCat(concept) : (NOM_DEFCAT[kind] || '') });
+  }
+  // Si el «descuento en especie» es mayor que los conceptos en especie detectados, la diferencia suele ser un
+  // cobro que en realidad se dio en especie (p. ej. un premio o regalo): se reclasifica ese concepto.
+  const sumK = k => lines.filter(x => x.kind === k).reduce((s, x) => s + x.amount, 0);
+  const diff = r2(sumK('espded') - sumK('esp'));
+  if (sumK('espded') > 0 && diff > 0.01) {
+    const x = lines.filter(x => x.kind === 'dev').slice(1).find(x => Math.abs(x.amount - diff) < 0.015);
+    if (x) { x.kind = 'esp'; x.cat = espCat(x.concept); }
   }
   const order = Object.keys(NOM_KINDS); lines.sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
   const T = norm(text); let month = null, mm;
