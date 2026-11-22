@@ -198,6 +198,31 @@ const DB = {
   putMany(s, arr) { return this.tx(s, 'readwrite', st => { arr.forEach(v => st.put(v)); }); },
 };
 
+/* ====================== Sincronización entre dispositivos (Supabase, cifrada) ======================
+   Cada cambio local se apunta en SY.meta ("tienda|id" → {u: fecha, p: pendiente de subir, d: borrado}).
+   Al sincronizar: se bajan los cambios de la nube (gana el más reciente) y se suben los pendientes.
+   Todo viaja cifrado con AES-GCM con una clave derivada de tu contraseña: el servidor no puede leerlo. */
+const SUPA_URL = '', SUPA_KEY = '';
+const SUPA_JS = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js';
+const SYNCED = ['cats', 'movs', 'nominas', 'files'];
+const SY = { meta: {}, last: 0, client: null, user: null, key: null, email: '', busy: false, again: false, timer: null, mt: null, status: '', err: '', lastOk: 0 };
+const RAW = { put: DB.put.bind(DB), del: DB.del.bind(DB), clear: DB.clear.bind(DB), putMany: DB.putMany.bind(DB) };
+const skey = (s, id) => s + '|' + id;
+const isSynced = (s, k) => SYNCED.includes(s) || (s === 'kv' && k === 'settings');
+function touch(s, k, deleted) { const u = Math.max(Date.now(), SY.last + 1); SY.last = u; SY.meta[skey(s, k)] = deleted ? { u, p: 1, d: 1 } : { u, p: 1 }; }
+function syncChanged() {
+  clearTimeout(SY.mt); SY.mt = setTimeout(() => RAW.put('kv', { k: 'sync_meta', v: SY.meta }), 300);
+  if (SY.user) { clearTimeout(SY.timer); SY.timer = setTimeout(syncNow, 2000); }
+}
+DB.put = async (s, v) => { await RAW.put(s, v); const k = s === 'kv' ? v.k : v.id; if (isSynced(s, k)) { touch(s, k); syncChanged(); } };
+DB.del = async (s, k) => { await RAW.del(s, k); if (isSynced(s, k)) { touch(s, k, true); syncChanged(); } };
+DB.putMany = async (s, arr) => { await RAW.putMany(s, arr); if (SYNCED.includes(s) && arr.length) { arr.forEach(v => touch(s, v.id)); syncChanged(); } };
+DB.clear = async s => {
+  if (!SYNCED.includes(s)) return RAW.clear(s);
+  const keys = await DB.tx(s, 'readonly', st => st.getAllKeys()); await RAW.clear(s);
+  keys.forEach(k => touch(s, k, true)); syncChanged();
+};
+
 /* ====================== Estado ====================== */
 const DEFAULT_CATS = [
   ['Nómina','Ingreso',1800],['Ingresos extra','Ingreso',150],['Otros ingresos','Ingreso',0],
@@ -894,6 +919,7 @@ function renderMore() {
       ${S.installEvt ? '<button class="btn full" id="mInstall">Instalar la app</button>' :
         `<p class="muted" style="margin:0">${isIOS ? 'En Safari: botón Compartir → «Añadir a pantalla de inicio».' : 'En Chrome: menú ⋮ → «Instalar aplicación» o «Añadir a pantalla de inicio».'}</p>`}</div>`}
     <div class="card row between"><span><b>💼 Mi nómina</b><br><span class="muted">Súbela y mira a dónde va tu sueldo</span></span><button class="btn sm" onclick="openNomList()">Abrir</button></div>
+    ${syncCard()}
     <div class="card"><h3>Subir archivos</h3>
       <p class="muted" style="margin:0 0 10px">Importa movimientos desde tu plantilla Excel, un extracto del banco (.xlsx o .csv) o una copia de seguridad. Si aparecen categorías nuevas, te preguntaré si quieres crearlas.</p>
       <label class="btn full" style="margin:0;color:inherit;text-align:center">📥 Importar Excel / CSV<input id="mImp" type="file" accept=".xlsx,.xls,.csv,.ods" hidden></label>
@@ -904,7 +930,7 @@ function renderMore() {
         <button class="btn ghost" id="mBak">💾 Copia de seguridad</button>
         <label class="btn ghost" style="margin:0;color:var(--text)">♻️ Restaurar copia<input id="mRes" type="file" accept=".json,application/json" hidden></label>
       </div>
-      <p class="muted" style="margin:10px 0 0">Tus datos se guardan solo en este teléfono. Haz una copia de seguridad de vez en cuando.</p>
+      <p class="muted" style="margin:10px 0 0">${SY.user ? 'Tus datos se guardan en este dispositivo y, cifrados, en tu cuenta de sincronización.' : 'Tus datos se guardan solo en este dispositivo. Haz una copia de seguridad de vez en cuando.'}</p>
     </div>
     <div class="card"><h3>Fondo de emergencia</h3>
       <div class="two"><div><label>Meses de colchón</label><input id="sEfM" inputmode="numeric" value="${st.efMonths}"></div>
@@ -921,14 +947,14 @@ function renderMore() {
     </div>`;
   if ($('#mInstall')) $('#mInstall').onclick = async () => { S.installEvt.prompt(); await S.installEvt.userChoice; S.installEvt = null; renderMore(); };
   $('#mImp').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) importFile(f); };
-  $('#mXlsx').onclick = exportXlsx; $('#mBak').onclick = backup;
+  $('#mXlsx').onclick = exportXlsx; $('#mBak').onclick = backup; bindSync();
   $('#mRes').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) restore(f); };
   $('#sCur').onchange = async e => { st.currency = e.target.value; await saveSettings(); renderMore(); };
   $('#sGoal').onchange = async e => { st.goal = (parseNum(e.target.value) || 0) / 100; await saveSettings(); };
   $('#sEfM').onchange = async e => { st.efMonths = parseInt(e.target.value) || 0; await saveSettings(); renderMore(); };
   $('#sEfI').onchange = async e => { st.efInitial = parseNum(e.target.value) || 0; await saveSettings(); renderMore(); };
   $('#mWipe').onclick = async () => {
-    if (!await confirmBox('¿Borrar todos los datos?', 'Se eliminarán todos los movimientos, facturas y categorías de este teléfono. No se puede deshacer.', 'Borrar todo', 'Cancelar', true)) return;
+    if (!await confirmBox('¿Borrar todos los datos?', 'Se eliminarán todos los movimientos, facturas y categorías de este dispositivo' + (SY.user ? ' <b>y de todos tus dispositivos sincronizados</b>' : '') + '. No se puede deshacer.', 'Borrar todo', 'Cancelar', true)) return;
     for (const s of ['cats', 'movs', 'files', 'nominas']) await DB.clear(s);
     S.movs = []; S.cats = []; S.nominas = []; await seedCats(); toast('Datos borrados'); renderMore();
   };
@@ -1072,7 +1098,7 @@ async function backup() {
 async function restore(file) {
   let data; try { data = JSON.parse(await file.text()); } catch { return toast('Archivo de copia no válido'); }
   if (data.app !== 'mi-presupuesto') return toast('Este archivo no es una copia de esta app');
-  if (!await confirmBox('¿Restaurar esta copia?', `Copia del ${new Date(data.date).toLocaleDateString('es-ES')} con ${data.movs.length} movimientos. Sustituirá los datos actuales del teléfono.`, 'Restaurar', 'Cancelar', true)) return;
+  if (!await confirmBox('¿Restaurar esta copia?', `Copia del ${new Date(data.date).toLocaleDateString('es-ES')} con ${data.movs.length} movimientos. Sustituirá los datos actuales${SY.user ? ' <b>en todos tus dispositivos sincronizados</b>' : ' del dispositivo'}.`, 'Restaurar', 'Cancelar', true)) return;
   for (const s of ['cats', 'movs', 'files', 'nominas']) await DB.clear(s);
   await DB.putMany('cats', data.cats); await DB.putMany('movs', data.movs); await DB.putMany('nominas', data.nominas || []); S.nominas = data.nominas || [];
   for (const f of data.files || []) { const blob = await (await fetch(f.data)).blob(); await DB.put('files', { id: f.id, name: f.name, type: f.type, blob }); }
@@ -1080,10 +1106,197 @@ async function restore(file) {
   toast('Copia restaurada ✓'); show('panel');
 }
 
+/* ====================== Sincronización: cifrado, nube y pantalla ====================== */
+const b64 = buf => { const a = new Uint8Array(buf); let s = ''; for (let i = 0; i < a.length; i += 0x8000) s += String.fromCharCode.apply(null, a.subarray(i, i + 0x8000)); return btoa(s); };
+const unb64 = s => { const bin = atob(s), a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a; };
+async function deriveKey(email, pass) {
+  const te = new TextEncoder(), base = await crypto.subtle.importKey('raw', te.encode(pass), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: te.encode('mi-presupuesto|' + email.trim().toLowerCase()), iterations: 310000, hash: 'SHA-256' },
+    base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function encObj(obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, SY.key, new TextEncoder().encode(JSON.stringify(obj))));
+  const out = new Uint8Array(12 + ct.length); out.set(iv); out.set(ct, 12); return b64(out);
+}
+async function decObj(s) {
+  const a = unb64(s);
+  try { return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: a.subarray(0, 12) }, SY.key, a.subarray(12)))); }
+  catch { throw new Error('Los datos de la nube están cifrados con otra contraseña. Cierra sesión y entra con la contraseña con la que los subiste.'); }
+}
+async function sbClient() {
+  if (!SUPA_URL) return null;
+  if (!SY.client) { if (!window.supabase) await loadScript(SUPA_JS); SY.client = window.supabase.createClient(SUPA_URL, SUPA_KEY, { auth: { persistSession: true, autoRefreshToken: true } }); }
+  return SY.client;
+}
+async function localItem(s, id) {
+  if (s === 'kv') { const r = await DB.get('kv', id); return r ? r.v : null; }
+  const r = await DB.get(s, id); if (!r) return null;
+  if (s === 'files') return { id: r.id, name: r.name, type: r.type, data: await fileToDataURL(r.blob) };
+  return r;
+}
+async function applyRemote(s, id, obj) {
+  if (s === 'kv') return obj ? RAW.put('kv', { k: id, v: obj }) : null;
+  if (!obj) return RAW.del(s, id);
+  if (s === 'files') { const blob = await (await fetch(obj.data)).blob(); return RAW.put('files', { id: obj.id, name: obj.name, type: obj.type, blob }); }
+  return RAW.put(s, obj);
+}
+function setSync(status, err = '') { SY.status = status; SY.err = err; if (S.view === 'more' && $('#syncCard')) $('#syncCard').outerHTML = syncCard(), bindSync(); }
+
+// Primera vez que este dispositivo se conecta: las categorías que ya existen en la nube con el mismo nombre
+// se unifican (así las 21 categorías de serie no salen duplicadas).
+async function dedupeCats() {
+  const { data, error } = await SY.client.from('items').select('id,data').eq('store', 'cats').eq('deleted', false);
+  if (error) throw error; if (!data.length) return;
+  const rc = []; for (const r of data) rc.push(await decObj(r.data));
+  const rById = Object.fromEntries(rc.map(c => [c.id, c]));
+  const pathOf = (c, all) => { const p = c.parent ? all[c.parent] : null; return norm((p ? p.name + ' › ' : '') + c.name); };
+  const rByPath = {}; rc.forEach(c => { rByPath[pathOf(c, rById)] = c.id; });
+  const lById = Object.fromEntries(S.cats.map(c => [c.id, c])), remap = {};
+  for (const c of S.cats) if (!rById[c.id] && rByPath[pathOf(c, lById)]) remap[c.id] = rByPath[pathOf(c, lById)];
+  const ids = Object.keys(remap); if (!ids.length) return;
+  for (const m of S.movs) if (remap[m.cat]) { m.cat = remap[m.cat]; await DB.put('movs', m); }
+  for (const c of S.cats) if (c.parent && remap[c.parent] && !remap[c.id]) { c.parent = remap[c.parent]; await DB.put('cats', c); }
+  for (const id of ids) { await RAW.del('cats', id); delete SY.meta[skey('cats', id)]; }
+  S.cats = S.cats.filter(c => !remap[c.id]);
+}
+
+async function syncNow() {
+  if (!SY.user || !SY.key) return;
+  if (SY.busy) { SY.again = true; return; }
+  SY.busy = true; SY.again = false; setSync('sync');
+  const c = SY.client; let changed = false;
+  try {
+    const seqRec = await DB.get('kv', 'sync_seq'); let seq = seqRec ? seqRec.v : 0;
+    if (!seqRec) {
+      await dedupeCats();
+      // Lo que ya había en este dispositivo antes de conectarse se sube (si choca con la nube, gana la nube)
+      for (const s of SYNCED) for (const k of await DB.tx(s, 'readonly', st => st.getAllKeys())) if (!SY.meta[skey(s, k)]) SY.meta[skey(s, k)] = { u: 1, p: 1 };
+      if (await DB.get('kv', 'settings') && !SY.meta['kv|settings']) SY.meta['kv|settings'] = { u: 1, p: 1 };
+    }
+    // 1) Bajar cambios de la nube (primero solo la lista, luego el contenido de lo que haga falta)
+    for (;;) {
+      const { data: rows, error } = await c.from('items').select('store,id,deleted,upd,seq').gt('seq', seq).order('seq').limit(500);
+      if (error) throw error; if (!rows.length) break;
+      const need = rows.filter(r => { const l = SY.meta[skey(r.store, r.id)]; return !(l && (l.p ? l.u > r.upd : l.u >= r.upd)); });
+      const bodies = {};
+      const want = need.filter(r => !r.deleted), byStore = {};
+      want.forEach(r => (byStore[r.store] ||= []).push(r.id));
+      for (const [s, ids] of Object.entries(byStore)) {
+        const step = s === 'files' ? 1 : 100;
+        for (let i = 0; i < ids.length; i += step) {
+          const { data, error: e2 } = await c.from('items').select('id,data,upd').eq('store', s).in('id', ids.slice(i, i + step));
+          if (e2) throw e2; data.forEach(d => { bodies[skey(s, d.id)] = d; });
+        }
+      }
+      for (const r of need) {
+        const k = skey(r.store, r.id);
+        if (r.deleted) { await applyRemote(r.store, r.id, null); SY.meta[k] = { u: r.upd, d: 1 }; changed = true; continue; }
+        const b = bodies[k]; if (!b) continue;
+        await applyRemote(r.store, r.id, await decObj(b.data)); SY.meta[k] = { u: b.upd }; changed = true;
+      }
+      seq = rows[rows.length - 1].seq; await RAW.put('kv', { k: 'sync_seq', v: seq });
+      if (rows.length < 500) break;
+    }
+    // 2) Subir lo pendiente
+    const batch = [];
+    const flush = async () => {
+      if (!batch.length) return;
+      const { error } = await c.rpc('push_items', { p: batch.map(x => x.item) }); if (error) throw error;
+      for (const x of batch) { const m = SY.meta[x.k]; if (m && m.u === x.u) delete m.p; }
+      batch.length = 0;
+    };
+    for (const [k, m] of Object.entries(SY.meta)) {
+      if (!m.p) continue;
+      const i = k.indexOf('|'), s = k.slice(0, i), id = k.slice(i + 1);
+      const obj = m.d ? null : await localItem(s, id);
+      batch.push({ k, u: m.u, item: { store: s, id, upd: m.u, deleted: !obj, data: obj ? await encObj(obj) : null } });
+      if (s === 'files' || batch.length >= 100) await flush();
+    }
+    await flush();
+    await RAW.put('kv', { k: 'sync_meta', v: SY.meta });
+    SY.lastOk = Date.now(); setSync('ok');
+  } catch (e) {
+    console.warn('sync', e);
+    setSync('error', !navigator.onLine ? 'Sin conexión: se sincronizará cuando vuelva internet.' : (e.message || String(e)));
+  } finally {
+    SY.busy = false;
+    if (changed) await reloadState();
+    if (SY.again) setTimeout(syncNow, 500);
+  }
+}
+async function reloadState() {
+  const kv = await DB.get('kv', 'settings'); if (kv) S.settings = { ...S.settings, ...kv.v }; setFmt();
+  S.cats = await DB.all('cats'); S.movs = await DB.all('movs'); S.nominas = await DB.all('nominas');
+  if (['panel', 'movs', 'cats', 'more'].includes(S.view) && $('#modal').classList.contains('hidden')) render();
+}
+async function syncLoadMeta() {
+  const m = await DB.get('kv', 'sync_meta'); SY.meta = (m && m.v) || {};
+  for (const x of Object.values(SY.meta)) if (x.u > SY.last) SY.last = x.u;
+}
+async function syncStart() {
+  const k = await DB.get('kv', 'sync_key'); if (!k || !SUPA_URL) return;
+  SY.key = k.v; SY.email = k.email || '';
+  try { const c = await sbClient(); const { data } = await c.auth.getSession(); SY.user = data.session ? data.session.user : null; }
+  catch (e) { setSync('error', 'Sin conexión: se sincronizará cuando vuelva internet.'); }
+  if (SY.user) syncNow(); else if (SY.client) setSync('error', 'La sesión ha caducado: vuelve a entrar.');
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) syncNow(); });
+window.addEventListener('online', () => { if (!SY.user && SY.key) syncStart(); else syncNow(); });
+setInterval(() => { if (!document.hidden) syncNow(); }, 60000);
+
+const AUTH_ES = [[/invalid login/i, 'Correo o contraseña incorrectos.'], [/not confirmed/i, 'Aún no has confirmado el correo: abre el enlace que te hemos enviado.'],
+  [/already registered|already been registered/i, 'Ya existe una cuenta con ese correo: pulsa «Entrar».'], [/at least 6|password should/i, 'La contraseña debe tener al menos 6 caracteres.'],
+  [/rate limit|too many/i, 'Demasiados intentos: espera un minuto.'], [/fetch|network/i, 'Sin conexión a internet.'], [/valid email|invalid.*email/i, 'Ese correo no es válido.']];
+const authEs = e => { const m = e.message || String(e); const f = AUTH_ES.find(([r]) => r.test(m)); return f ? f[1] : m; };
+async function syncLogin(create) {
+  const email = $('#syEmail').value.trim(), pass = $('#syPass').value;
+  if (!email || !pass) return toast('Escribe correo y contraseña');
+  if (create && pass.length < 8) return toast('Usa una contraseña de al menos 8 caracteres');
+  setSync('login');
+  try {
+    const c = await sbClient();
+    const r = create ? await c.auth.signUp({ email, password: pass, options: { emailRedirectTo: location.origin + location.pathname } })
+      : await c.auth.signInWithPassword({ email, password: pass });
+    if (r.error) throw r.error;
+    if (!r.data.session) { setSync('', ''); return confirmBox('Confirma tu correo', `Te hemos enviado un correo a <b>${esc(email)}</b>. Pulsa el enlace que contiene y después vuelve aquí y pulsa <b>Entrar</b>.`, 'Entendido', 'Cerrar'); }
+    SY.user = r.data.session.user; SY.email = email; SY.key = await deriveKey(email, pass);
+    await RAW.put('kv', { k: 'sync_key', v: SY.key, email });
+    toast('Conectado ✓ Sincronizando…'); await syncNow();
+  } catch (e) { setSync('error', authEs(e)); }
+}
+async function syncLogout() {
+  if (!await confirmBox('¿Cerrar sesión?', 'Los datos se quedan en este dispositivo, pero dejarán de sincronizarse hasta que vuelvas a entrar.', 'Cerrar sesión', 'Cancelar')) return;
+  try { await SY.client.auth.signOut(); } catch {}
+  SY.user = null; SY.key = null; await RAW.del('kv', 'sync_key'); await RAW.del('kv', 'sync_seq'); setSync('');
+}
+function syncCard() {
+  if (!SUPA_URL) return `<div class="card" id="syncCard"><h3>☁️ Sincronizar dispositivos</h3><p class="muted" style="margin:0">Todavía no está configurada.</p></div>`;
+  const err = SY.err ? `<p class="warn-box" style="margin:10px 0 0">${esc(SY.err)}</p>` : '';
+  if (SY.user) {
+    const st = SY.status === 'sync' ? '🔄 Sincronizando…' : SY.status === 'error' ? '⚠️ Con problemas' : SY.lastOk ? `✔ Al día · ${new Date(SY.lastOk).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}` : '…';
+    return `<div class="card" id="syncCard"><h3>☁️ Sincronizar dispositivos</h3>
+      <div class="row between"><span class="muted">Cuenta</span><b>${esc(SY.email || SY.user.email || '')}</b></div>
+      <div class="row between" style="margin-top:4px"><span class="muted">Estado</span><span>${st}</span></div>${err}
+      <div class="row" style="margin-top:12px;flex-wrap:wrap"><button class="btn sm" id="sySync">Sincronizar ahora</button><button class="btn sm ghost" id="syOut">Cerrar sesión</button></div>
+      <p class="muted" style="margin:10px 0 0">Entra con esta misma cuenta en el móvil y en el ordenador y verás lo mismo en los dos. Todo viaja cifrado con tu contraseña.</p></div>`;
+  }
+  return `<div class="card" id="syncCard"><h3>☁️ Sincronizar dispositivos</h3>
+    <p class="muted" style="margin:0 0 10px">Crea una cuenta en un dispositivo y entra con la misma en los demás: lo que apuntes en uno aparecerá en todos.</p>
+    <label>Correo</label><input id="syEmail" type="email" autocomplete="username" inputmode="email" value="${esc(SY.email)}">
+    <label style="margin-top:8px;display:block">Contraseña</label><input id="syPass" type="password" autocomplete="current-password">
+    <div class="row" style="margin-top:12px"><button class="btn" id="syIn" ${SY.status === 'login' ? 'disabled' : ''}>Entrar</button><button class="btn ghost" id="syNew" ${SY.status === 'login' ? 'disabled' : ''}>Crear cuenta</button></div>${err}
+    <p class="muted" style="margin:10px 0 0">🔒 Tus datos se cifran en el dispositivo con tu contraseña antes de subirlos: nadie más puede leerlos. Si la olvidas, lo guardado en la nube no se podrá recuperar (lo de cada dispositivo sigue ahí).</p></div>`;
+}
+function bindSync() {
+  if ($('#syIn')) { $('#syIn').onclick = () => syncLogin(false); $('#syNew').onclick = () => syncLogin(true); }
+  if ($('#sySync')) { $('#sySync').onclick = () => syncNow(); $('#syOut').onclick = syncLogout; }
+}
+
 /* ====================== Arranque ====================== */
 async function seedCats() { for (const [name, type, budget] of DEFAULT_CATS) await createCat({ name, type, budget }); }
 async function init() {
-  await DB.open();
+  await DB.open(); await syncLoadMeta();
   const kv = await DB.get('kv', 'settings'); if (kv) S.settings = { ...S.settings, ...kv.v };
   setFmt();
   S.cats = await DB.all('cats'); S.movs = await DB.all('movs'); S.nominas = await DB.all('nominas');
@@ -1094,6 +1307,7 @@ async function init() {
   show('panel');
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  syncStart();
 }
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); S.installEvt = e; if (S.view === 'more') renderMore(); });
 init().catch(e => { document.body.innerHTML = '<p style="padding:20px">No se pudo abrir la base de datos del navegador: ' + esc(e.message) + '</p>'; });
