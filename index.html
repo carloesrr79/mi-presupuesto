@@ -106,6 +106,14 @@ nav button.plus span.p{width:50px;height:50px;margin-top:-22px;border-radius:50%
 #toast.on{opacity:1}
 .muted{color:var(--muted);font-size:13px}
 .chart{width:100%;height:auto;display:block}
+.seg.two{grid-template-columns:1fr 1fr;margin-bottom:12px}
+.ytab{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
+.ytab th{font-weight:600;color:var(--muted);text-align:right;padding:6px 4px;border-bottom:1px solid var(--line)}
+.ytab th:first-child,.ytab td:first-child{text-align:left}
+.ytab td{text-align:right;padding:8px 4px;border-bottom:1px solid var(--line);white-space:nowrap}
+.ytab tr.m{cursor:pointer}.ytab tr.m:active{background:var(--field)}
+.ytab tr.empty td{color:var(--muted)}
+.ytab tfoot td{font-weight:700;border-bottom:0}
 .chart text{fill:var(--muted);font-size:10px}
 .spin{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:s .8s linear infinite;vertical-align:-2px}
 @keyframes s{to{transform:rotate(360deg)}}
@@ -236,7 +244,7 @@ const S = {
   cats: [], movs: [], view: 'panel', month: today().slice(0, 7),
   settings: { currency: 'EUR', goal: 0.2, efMonths: 6, efInitial: 0 },
   add: { kind: 'gasto', editId: null, file: null, removeFile: false },
-  catFilter: '', search: '', installEvt: null, nominas: [], nom: { mode: 'list' },
+  catFilter: '', search: '', installEvt: null, period: 'month', nominas: [], nom: { mode: 'list' },
 };
 const byId = id => S.cats.find(c => c.id === id);
 const topOf = c => c && c.parent ? byId(c.parent) : c;
@@ -320,15 +328,18 @@ function show(v) {
 }
 function render() {
   const [y, m] = S.month.split('-').map(Number);
-  $('#mLabel').textContent = `${MONTHS[m - 1]} ${y}`;
+  $('#mLabel').textContent = S.view === 'panel' && S.period === 'year' ? `Año ${y}` : `${MONTHS[m - 1]} ${y}`;
   ({ panel: renderPanel, movs: renderMovs, add: renderAdd, cats: renderCats, more: renderMore, nom: renderNom })[S.view]();
 }
-function shiftMonth(d) { let [y, m] = S.month.split('-').map(Number); m += d; if (m < 1) { m = 12; y--; } if (m > 12) { m = 1; y++; } S.month = `${y}-${pad(m)}`; render(); }
+function shiftMonth(d) { if (S.view === 'panel' && S.period === 'year') d *= 12; let [y, m] = S.month.split('-').map(Number); m += d; if (m < 1) { m = 12; y--; } if (m > 12) { m = 1; y++; } S.month = `${y}-${pad(m)}`; render(); }
 
 /* ====================== Panel ====================== */
 function totals(ms) { const t = { ingreso: 0, gasto: 0, ahorro: 0 }; ms.forEach(m => t[movKind(m)] += m.amount); return t; }
 function monthMovs(ym) { return S.movs.filter(m => m.date.startsWith(ym)); }
+const periodSeg = () => `<div class="seg two" id="perSeg"><button data-p="month" class="${S.period === 'month' ? 'on' : ''}">📆 Mes</button><button data-p="year" class="${S.period === 'year' ? 'on' : ''}">📅 Año</button></div>`;
+function bindPeriodSeg() { $$('#perSeg button').forEach(b => b.onclick = () => { S.period = b.dataset.p; try { localStorage.setItem('period', S.period); } catch {} render(); window.scrollTo(0, 0); }); }
 function renderPanel() {
+  if (S.period === 'year') return renderYear();
   const ms = monthMovs(S.month), t = totals(ms);
   const bal = t.ingreso - t.gasto - t.ahorro, rate = t.ingreso ? t.ahorro / t.ingreso : 0;
   const tm = S.movs.filter(m => m.date === today()), tt = totals(tm);
@@ -353,7 +364,7 @@ function renderPanel() {
         <div class="row between" style="margin-top:5px"><span class="muted">${b ? Math.round(pct * 100) + ' %' : ''}</span>${tag}</div>${subs}</div>`;
     }).join('') + '</div>';
   }
-  $('#v-panel').innerHTML = `
+  $('#v-panel').innerHTML = `${periodSeg()}
     <div class="kpis">
       <div class="kpi"><small>Ingresos</small><b class="c-ing">${money(t.ingreso)}</b></div>
       <div class="kpi"><small>Gastos</small><b class="c-gas">${money(t.gasto)}</b></div>
@@ -372,7 +383,62 @@ function renderPanel() {
     ${nomPanelCard()}
     <div class="card"><h3>Últimos 6 meses</h3>${chart6()}</div>
     ${groups || '<div class="empty">Aún no hay movimientos este mes.<br><br><button class="btn" onclick="newMov()">Añadir el primero</button></div>'}`;
+  bindPeriodSeg();
 }
+
+/* ---------- Resumen anual ---------- */
+function renderYear() {
+  const y = S.month.slice(0, 4), ym = S.movs.filter(m => m.date.startsWith(y)), t = totals(ym);
+  const bal = t.ingreso - t.gasto - t.ahorro, rate = t.ingreso ? t.ahorro / t.ingreso : 0;
+  const months = MONTHS.map((_, i) => { const ms = monthMovs(`${y}-${pad(i + 1)}`), x = totals(ms); return { i, n: ms.length, ...x, bal: x.ingreso - x.gasto - x.ahorro }; });
+  const withData = months.filter(m => m.n).length, active = withData || 1;
+  const max = Math.max(1, ...months.flatMap(d => [d.ingreso, d.gasto + d.ahorro])), bw = 11;
+  const bars = months.map((d, k) => { const x = 6 + k * 30, hi = d.ingreso / max * 90, hg = (d.gasto + d.ahorro) / max * 90;
+    return `<rect x="${x}" y="${100 - hi}" width="${bw}" height="${hi}" rx="2" fill="var(--ing)"/><rect x="${x + bw + 2}" y="${100 - hg}" width="${bw}" height="${hg}" rx="2" fill="var(--gas)"/><text x="${x + bw + 1}" y="114" text-anchor="middle">${MSHORT[k][0]}</text>`; }).join('');
+  const chart = `<svg class="chart" viewBox="0 0 366 120" role="img" aria-label="Ingresos y salidas de cada mes de ${y}">${bars}</svg>
+    <div class="row" style="gap:14px;font-size:12px;color:var(--muted)"><span><b class="c-ing">■</b> Ingresos</span><span><b class="c-gas">■</b> Gastos + ahorro</span></div>`;
+  const f = v => v ? money(v).replace(/\s?€/, '') : '–';
+  const rows = months.map(d => `<tr class="m ${d.n ? '' : 'empty'}" data-m="${d.i + 1}"><td>${MSHORT[d.i]}</td><td class="c-ing">${f(d.ingreso)}</td><td class="c-gas">${f(d.gasto)}</td><td class="c-aho">${f(d.ahorro)}</td><td class="${d.bal < 0 ? 'c-bad' : ''}">${d.n ? f(d.bal) : '–'}</td></tr>`).join('');
+  const table = `<table class="ytab"><thead><tr><th>Mes</th><th>Ingresos</th><th>Gastos</th><th>Ahorro</th><th>Balance</th></tr></thead><tbody>${rows}</tbody>
+    <tfoot><tr><td>Total</td><td class="c-ing">${f(t.ingreso)}</td><td class="c-gas">${f(t.gasto)}</td><td class="c-aho">${f(t.ahorro)}</td><td class="${bal < 0 ? 'c-bad' : ''}">${f(bal)}</td></tr></tfoot></table>
+    <p class="muted" style="margin:8px 0 0;font-size:12px">Importes en ${S.settings.currency}. Toca un mes para verlo en detalle.</p>`;
+  const real = {}; ym.forEach(m => { real[m.cat] = (real[m.cat] || 0) + m.amount; });
+  const realTop = id => (real[id] || 0) + subsOf(id).reduce((s, c) => s + (real[c.id] || 0), 0);
+  let groups = '';
+  for (const type of TYPES) {
+    const cs = tops().filter(c => c.type === type && realTop(c.id) > 0).sort((a, b) => realTop(b.id) - realTop(a.id));
+    if (!cs.length) continue;
+    const kind = kindOfType(type), tot = cs.reduce((s, c) => s + realTop(c.id), 0);
+    groups += `<div class="grp">${type} · ${money(tot)}</div><div class="card">` + cs.map(c => {
+      const r = realTop(c.id), b = c.budget * 12, pct = b ? r / b : 0;
+      const color = kind === 'gasto' ? (pct > 1 ? 'var(--bad)' : 'var(--gas)') : kind === 'ingreso' ? 'var(--ing)' : 'var(--aho)';
+      const subs = subsOf(c.id).filter(s => real[s.id]).sort((a, b) => real[b.id] - real[a.id]).map(s => `<div class="sub"><span>› ${esc(s.name)}</span><span>${money(real[s.id])}</span></div>`).join('');
+      return `<div class="catline"><div class="top"><span class="nm">${esc(c.name)}</span><span class="am">${money(r)}${b ? ` <span class="c-muted">/ ${money(b)}</span>` : ''}</span></div>
+        ${b ? `<div class="bar"><i style="width:${Math.min(100, pct * 100)}%;background:${color}"></i></div>` : ''}
+        <div class="row between" style="margin-top:5px"><span class="muted">Media ${money(r / active)}/mes</span><span class="muted">${tot ? Math.round(r / tot * 100) : 0} % del total</span></div>${subs}</div>`;
+    }).join('') + '</div>';
+  }
+  $('#v-panel').innerHTML = `${periodSeg()}
+    <div class="kpis">
+      <div class="kpi"><small>Ingresos ${y}</small><b class="c-ing">${money(t.ingreso)}</b></div>
+      <div class="kpi"><small>Gastos ${y}</small><b class="c-gas">${money(t.gasto)}</b></div>
+      <div class="kpi"><small>Ahorro ${y}</small><b class="c-aho">${money(t.ahorro)}</b></div>
+      <div class="kpi"><small>Balance del año</small><b class="${bal < 0 ? 'c-bad' : ''}">${money(bal)}</b></div>
+    </div>
+    <div class="card">
+      <div class="row between"><h3 style="margin:0">Tasa de ahorro del año</h3><b>${Math.round(rate * 100)} % <span class="muted">/ objetivo ${Math.round(S.settings.goal * 100)} %</span></b></div>
+      <div class="bar" style="margin-top:8px"><i style="width:${Math.min(100, S.settings.goal ? rate / S.settings.goal * 100 : 0)}%;background:var(--aho)"></i></div>
+      <p class="muted" style="margin:8px 0 0">${withData} mes${withData === 1 ? '' : 'es'} con movimientos · gasto medio ${money(t.gasto / active)}/mes</p>
+    </div>
+    <div class="card"><h3>Mes a mes</h3>${chart}</div>
+    <div class="card" style="padding:12px 10px">${table}</div>
+    ${nomYearCard(y)}
+    <p class="muted" style="margin:0 4px 8px;font-size:12px">Por categoría: total del año / presupuesto anual (mensual × 12).</p>
+    ${groups || `<div class="empty">No hay movimientos en ${y}.</div>`}`;
+  bindPeriodSeg();
+  $$('#v-panel tr.m').forEach(tr => tr.onclick = () => { S.month = `${y}-${pad(tr.dataset.m)}`; S.period = 'month'; try { localStorage.setItem('period', 'month'); } catch {} render(); window.scrollTo(0, 0); });
+}
+
 function chart6() {
   let [y, m] = S.month.split('-').map(Number); const data = [];
   for (let i = 5; i >= 0; i--) { let mm = m - i, yy = y; while (mm < 1) { mm += 12; yy--; } const t = totals(monthMovs(`${yy}-${pad(mm)}`)); data.push({ l: MSHORT[mm - 1], i: t.ingreso, g: t.gasto + t.ahorro }); }
@@ -1308,6 +1374,7 @@ function bindSync() {
 async function seedCats() { for (const [name, type, budget] of DEFAULT_CATS) await createCat({ name, type, budget }); }
 async function init() {
   await DB.open(); await syncLoadMeta();
+  try { if (localStorage.getItem('period') === 'year') S.period = 'year'; } catch {}
   const kv = await DB.get('kv', 'settings'); if (kv) S.settings = { ...S.settings, ...kv.v };
   setFmt();
   S.cats = await DB.all('cats'); S.movs = await DB.all('movs'); S.nominas = await DB.all('nominas');
