@@ -387,11 +387,10 @@ function renderPanel() {
 }
 
 /* ---------- Resumen anual ---------- */
-const ownAho = ms => ms.filter(m => !m.nomina && movKind(m) === 'ahorro').reduce((s, m) => s + m.amount, 0);
 function renderYear() {
   const y = S.month.slice(0, 4), ym = S.movs.filter(m => m.date.startsWith(y)), t = totals(ym);
-  const bal = t.ingreso - t.gasto - t.ahorro, aho = ownAho(ym), nomAho = t.ahorro - aho, rate = t.ingreso ? aho / t.ingreso : 0;
-  const months = MONTHS.map((_, i) => { const ms = monthMovs(`${y}-${pad(i + 1)}`), x = totals(ms); return { i, n: ms.length, ...x, aho: ownAho(ms), bal: x.ingreso - x.gasto - x.ahorro }; });
+  const bal = t.ingreso - t.gasto - t.ahorro, rate = t.ingreso ? t.ahorro / t.ingreso : 0;
+  const months = MONTHS.map((_, i) => { const ms = monthMovs(`${y}-${pad(i + 1)}`), x = totals(ms); return { i, n: ms.length, ...x, bal: x.ingreso - x.gasto - x.ahorro }; });
   const withData = months.filter(m => m.n).length, active = withData || 1;
   const max = Math.max(1, ...months.flatMap(d => [d.ingreso, d.gasto + d.ahorro])), bw = 11;
   const bars = months.map((d, k) => { const x = 6 + k * 30, hi = d.ingreso / max * 90, hg = (d.gasto + d.ahorro) / max * 90;
@@ -399,10 +398,10 @@ function renderYear() {
   const chart = `<svg class="chart" viewBox="0 0 366 120" role="img" aria-label="Ingresos y salidas de cada mes de ${y}">${bars}</svg>
     <div class="row" style="gap:14px;font-size:12px;color:var(--muted)"><span><b class="c-ing">■</b> Ingresos</span><span><b class="c-gas">■</b> Gastos + ahorro</span></div>`;
   const f = v => v ? money(v).replace(/\s?€/, '') : '–';
-  const rows = months.map(d => `<tr class="m ${d.n ? '' : 'empty'}" data-m="${d.i + 1}"><td>${MSHORT[d.i]}</td><td class="c-ing">${f(d.ingreso)}</td><td class="c-gas">${f(d.gasto)}</td><td class="c-aho">${d.n ? (d.aho ? f(d.aho) : '0') : '–'}</td><td class="${d.bal < 0 ? 'c-bad' : ''}">${d.n ? f(d.bal) : '–'}</td></tr>`).join('');
+  const rows = months.map(d => `<tr class="m ${d.n ? '' : 'empty'}" data-m="${d.i + 1}"><td>${MSHORT[d.i]}</td><td class="c-ing">${f(d.ingreso)}</td><td class="c-gas">${f(d.gasto)}</td><td class="c-aho">${f(d.ahorro)}</td><td class="${d.bal < 0 ? 'c-bad' : ''}">${d.n ? f(d.bal) : '–'}</td></tr>`).join('');
   const table = `<table class="ytab"><thead><tr><th>Mes</th><th>Ingresos</th><th>Gastos</th><th>Ahorro</th><th>Balance</th></tr></thead><tbody>${rows}</tbody>
-    <tfoot><tr><td>Total</td><td class="c-ing">${f(t.ingreso)}</td><td class="c-gas">${f(t.gasto)}</td><td class="c-aho">${aho ? f(aho) : '0'}</td><td class="${bal < 0 ? 'c-bad' : ''}">${f(bal)}</td></tr></tfoot></table>
-    <p class="muted" style="margin:8px 0 0;font-size:12px">Importes en ${S.settings.currency}. Toca un mes para verlo en detalle.${nomAho ? ` «Ahorro» es solo lo que apuntas tú: el plan de pensiones de la nómina (${money(nomAho)}) no cuenta aquí, pero sí aparece en sus categorías.` : ''}</p>`;
+    <tfoot><tr><td>Total</td><td class="c-ing">${f(t.ingreso)}</td><td class="c-gas">${f(t.gasto)}</td><td class="c-aho">${f(t.ahorro)}</td><td class="${bal < 0 ? 'c-bad' : ''}">${f(bal)}</td></tr></tfoot></table>
+    <p class="muted" style="margin:8px 0 0;font-size:12px">Importes en ${S.settings.currency}. Toca un mes para verlo en detalle.</p>`;
   const real = {}; ym.forEach(m => { real[m.cat] = (real[m.cat] || 0) + m.amount; });
   const realTop = id => (real[id] || 0) + subsOf(id).reduce((s, c) => s + (real[c.id] || 0), 0);
   let groups = '';
@@ -423,7 +422,7 @@ function renderYear() {
     <div class="kpis">
       <div class="kpi"><small>Ingresos ${y}</small><b class="c-ing">${money(t.ingreso)}</b></div>
       <div class="kpi"><small>Gastos ${y}</small><b class="c-gas">${money(t.gasto)}</b></div>
-      <div class="kpi"><small>Ahorro ${y}</small><b class="c-aho">${money(aho)}</b></div>
+      <div class="kpi"><small>Ahorro ${y}</small><b class="c-aho">${money(t.ahorro)}</b></div>
       <div class="kpi"><small>Balance del año</small><b class="${bal < 0 ? 'c-bad' : ''}">${money(bal)}</b></div>
     </div>
     <div class="card">
