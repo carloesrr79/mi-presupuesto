@@ -47,6 +47,9 @@ main{padding:12px 16px calc(96px + env(safe-area-inset-bottom));max-width:640px;
 .row{display:flex;align-items:center;gap:8px}.end{justify-content:flex-end}.between{justify-content:space-between}
 .catline{padding:8px 0;border-top:1px solid var(--line)}.catline:first-of-type{border-top:0}
 .catline .top{display:flex;justify-content:space-between;gap:8px;margin-bottom:5px}
+.catline.tap{cursor:pointer}.catline .chev{display:inline-block;width:12px;color:var(--muted)}
+.cdet{margin:0 0 6px;padding:2px 10px 4px;background:var(--field);border-radius:10px}
+.cdet .cday{display:flex;justify-content:space-between;font-size:12px;font-weight:600;color:var(--muted);padding:8px 0 2px;text-transform:capitalize}
 .catline .nm{font-weight:600}.catline .am{font-variant-numeric:tabular-nums;white-space:nowrap}
 .sub{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;padding:2px 0 0 12px}
 .tag{font-size:11px;padding:2px 7px;border-radius:20px;background:var(--line);color:var(--muted);white-space:nowrap}
@@ -244,7 +247,7 @@ const S = {
   cats: [], movs: [], view: 'panel', month: today().slice(0, 7),
   settings: { currency: 'EUR', goal: 0.2, efMonths: 6, efInitial: 0 },
   add: { kind: 'gasto', editId: null, file: null, removeFile: false },
-  catFilter: '', search: '', installEvt: null, period: 'month', nominas: [], nom: { mode: 'list' },
+  catFilter: '', search: '', installEvt: null, period: 'month', openCats: new Set(), nominas: [], nom: { mode: 'list' },
 };
 const byId = id => S.cats.find(c => c.id === id);
 const topOf = c => c && c.parent ? byId(c.parent) : c;
@@ -359,9 +362,10 @@ function renderPanel() {
       }
       const color = kind === 'gasto' ? (pct > 1 ? 'var(--bad)' : pct > .8 ? 'var(--warn)' : 'var(--gas)') : kind === 'ingreso' ? 'var(--ing)' : 'var(--aho)';
       const subs = subsOf(c.id).filter(s => real[s.id]).map(s => `<div class="sub"><span>› ${esc(s.name)}</span><span>${money(real[s.id])}</span></div>`).join('');
-      return `<div class="catline"><div class="top"><span class="nm">${esc(c.name)}</span><span class="am">${money(r)}${b ? ` <span class="c-muted">/ ${money(b)}</span>` : ''}</span></div>
+      const open = S.openCats.has(c.id), has = r > 0;
+      return `<div class="catline ${has ? 'tap' : ''}" ${has ? `data-cat="${c.id}" role="button" aria-expanded="${open}"` : ''}><div class="top"><span class="nm">${has ? `<span class="chev">${open ? '▾' : '▸'}</span> ` : ''}${esc(c.name)}</span><span class="am">${money(r)}${b ? ` <span class="c-muted">/ ${money(b)}</span>` : ''}</span></div>
         ${b ? `<div class="bar"><i style="width:${Math.min(100, pct * 100)}%;background:${color}"></i></div>` : ''}
-        <div class="row between" style="margin-top:5px"><span class="muted">${b ? Math.round(pct * 100) + ' %' : ''}</span>${tag}</div>${subs}</div>`;
+        <div class="row between" style="margin-top:5px"><span class="muted">${b ? Math.round(pct * 100) + ' %' : ''}</span>${tag}</div>${open ? '' : subs}</div>${open ? catDetail(c, ms) : ''}`;
     }).join('') + '</div>';
   }
   $('#v-panel').innerHTML = `${periodSeg()}
@@ -384,6 +388,22 @@ function renderPanel() {
     <div class="card"><h3>Últimos 6 meses</h3>${chart6()}</div>
     ${groups || '<div class="empty">Aún no hay movimientos este mes.<br><br><button class="btn" onclick="newMov()">Añadir el primero</button></div>'}`;
   bindPeriodSeg();
+  $$('#v-panel .catline.tap').forEach(e => e.onclick = () => { const id = e.dataset.cat; S.openCats.has(id) ? S.openCats.delete(id) : S.openCats.add(id); const y = window.scrollY; renderPanel(); window.scrollTo(0, y); });
+  $$('#v-panel .cdet .mov').forEach(e => e.onclick = () => openMov(e.dataset.id));
+}
+/* Detalle de una categoría en el mes: movimientos agrupados por día */
+function catDetail(c, ms) {
+  const ids = new Set([c.id, ...subsOf(c.id).map(s => s.id)]);
+  const list = ms.filter(m => ids.has(m.cat)).sort((a, b) => b.date.localeCompare(a.date) || (b.created || 0) - (a.created || 0));
+  const days = {}; list.forEach(m => (days[m.date] ||= []).push(m));
+  return `<div class="cdet">` + Object.keys(days).map(d => {
+    const dt = new Date(d + 'T12:00'), tot = days[d].reduce((s, m) => s + m.amount, 0);
+    return `<div class="cday"><span>${dt.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' })}</span><span>${money(tot)}</span></div>${days[d].map(movRow).join('')}`;
+  }).join('') + `<div class="muted" style="font-size:12px;padding:6px 0 2px">${list.length} movimiento${list.length === 1 ? '' : 's'} · toca uno para editarlo</div></div>`;
+}
+function openMov(id) {
+  const m = S.movs.find(x => x.id === id);
+  if (m && m.nomina && S.nominas.some(n => n.id === m.nomina)) openNom(m.nomina); else editMov(id);
 }
 
 /* ---------- Resumen anual ---------- */
@@ -463,10 +483,7 @@ function renderMovs() {
   $('#v-movs').innerHTML = `<input id="search" type="search" placeholder="Buscar por descripción o categoría" value="${esc(S.search)}" style="margin-bottom:6px">
     ${list || `<div class="empty">No hay movimientos ${q ? 'que coincidan' : 'en este mes'}.</div>`}`;
   const s = $('#search'); s.oninput = () => { S.search = s.value; const pos = s.selectionStart; renderMovs(); const n = $('#search'); n.focus(); n.setSelectionRange(pos, pos); };
-  $$('.mov', $('#v-movs')).forEach(e => e.onclick = () => {
-    const m = S.movs.find(x => x.id === e.dataset.id);
-    if (m && m.nomina && S.nominas.some(n => n.id === m.nomina)) openNom(m.nomina); else editMov(e.dataset.id);
-  });
+  $$('.mov', $('#v-movs')).forEach(e => e.onclick = () => openMov(e.dataset.id));
 }
 function movRow(m) {
   const k = movKind(m), c = byId(m.cat);
