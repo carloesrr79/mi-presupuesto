@@ -1,4 +1,4 @@
-const CACHE = 'presupuesto-v10';
+const CACHE = 'presupuesto-v11';
 const SHELL = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png',
   'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'];
 self.addEventListener('install', e => {
@@ -12,7 +12,7 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   // App propia: red primero (para recibir actualizaciones), caché si no hay conexión
   if (url.origin === location.origin) {
-    e.respondWith(fetch(e.request).then(r => { const cp = r.clone(); caches.open(CACHE).then(c => c.put(e.request, cp)); return r; })
+    e.respondWith(fetch(e.request, { cache: 'no-cache' }).then(r => { const cp = r.clone(); caches.open(CACHE).then(c => c.put(e.request, cp)); return r; })
       .catch(() => caches.match(e.request).then(r => r || caches.match('./index.html'))));
     return;
   }
