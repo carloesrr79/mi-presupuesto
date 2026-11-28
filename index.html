@@ -216,7 +216,7 @@ const DB = {
 const SUPA_URL = 'https://sogsdsxmutkdiewdcweu.supabase.co', SUPA_KEY = 'sb_publishable_bCm8yvmE6kFpF1Ovh9lOow_6ZHXo8JX'; // clave pública (segura con RLS)
 const SUPA_JS = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.0/dist/umd/supabase.min.js';
 const SYNCED = ['cats', 'movs', 'nominas', 'files'];
-const SY = { meta: {}, last: 0, client: null, user: null, key: null, email: '', busy: false, again: false, timer: null, mt: null, status: '', err: '', lastOk: 0 };
+const SY = { meta: {}, last: 0, lastFull: 0, client: null, user: null, key: null, email: '', busy: false, again: false, timer: null, mt: null, status: '', err: '', lastOk: 0 };
 const RAW = { put: DB.put.bind(DB), del: DB.del.bind(DB), clear: DB.clear.bind(DB), putMany: DB.putMany.bind(DB) };
 const skey = (s, id) => s + '|' + id;
 const isSynced = (s, k) => SYNCED.includes(s) || (s === 'kv' && k === 'settings');
@@ -368,7 +368,7 @@ function renderPanel() {
         <div class="row between" style="margin-top:5px"><span class="muted">${b ? Math.round(pct * 100) + ' %' : ''}</span>${tag}</div>${open ? '' : subs}</div>${open ? catDetail(c, ms) : ''}`;
     }).join('') + '</div>';
   }
-  $('#v-panel').innerHTML = `${periodSeg()}
+  $('#v-panel').innerHTML = `${syncWarn()}${periodSeg()}
     <div class="kpis">
       <div class="kpi"><small>Ingresos</small><b class="c-ing">${money(t.ingreso)}</b></div>
       <div class="kpi"><small>Gastos</small><b class="c-gas">${money(t.gasto)}</b></div>
@@ -438,7 +438,7 @@ function renderYear() {
         <div class="row between" style="margin-top:5px"><span class="muted">Media ${money(r / active)}/mes</span><span class="muted">${tot ? Math.round(r / tot * 100) : 0} % del total</span></div>${subs}</div>`;
     }).join('') + '</div>';
   }
-  $('#v-panel').innerHTML = `${periodSeg()}
+  $('#v-panel').innerHTML = `${syncWarn()}${periodSeg()}
     <div class="kpis">
       <div class="kpi"><small>Ingresos ${y}</small><b class="c-ing">${money(t.ingreso)}</b></div>
       <div class="kpi"><small>Gastos ${y}</small><b class="c-gas">${money(t.gasto)}</b></div>
@@ -1235,7 +1235,16 @@ async function applyRemote(s, id, obj) {
   if (s === 'files') { const blob = await (await fetch(obj.data)).blob(); return RAW.put('files', { id: obj.id, name: obj.name, type: obj.type, blob }); }
   return RAW.put(s, obj);
 }
-function setSync(status, err = '') { SY.status = status; SY.err = err; if (S.view === 'more' && $('#syncCard')) $('#syncCard').outerHTML = syncCard(), bindSync(); }
+function setSync(status, err = '') { SY.status = status; SY.err = err; if (S.view === 'more' && $('#syncCard')) $('#syncCard').outerHTML = syncCard(), bindSync(); if (S.view === 'panel' && $('#syncWarn')) $('#syncWarn').outerHTML = syncWarn(); }
+// Aviso en el Panel cuando este dispositivo no está sincronizando (para no ver datos distintos sin saberlo)
+function syncWarn() {
+  let msg = '';
+  if (!SY.ready) msg = '';
+  else if (SUPA_URL && !SY.key) msg = 'Este dispositivo no está sincronizado: lo que ves aquí puede no coincidir con tus otros dispositivos.';
+  else if (SY.key && !SY.user && SY.status === 'error') msg = SY.err || 'La sesión ha caducado: vuelve a entrar.';
+  else if (SY.status === 'error' && SY.err) msg = 'No se pudo sincronizar: ' + SY.err;
+  return msg ? `<div id="syncWarn" class="warn-box" style="margin:0 0 12px;cursor:pointer" onclick="show('more')">⚠️ ${esc(msg)} <u>Ver sincronización</u></div>` : '<div id="syncWarn"></div>';
+}
 
 // Primera vez que este dispositivo se conecta: las categorías que ya existen en la nube con el mismo nombre
 // se unifican (así las 21 categorías de serie no salen duplicadas).
@@ -1255,13 +1264,17 @@ async function dedupeCats() {
   S.cats = S.cats.filter(c => !remap[c.id]);
 }
 
-async function syncNow() {
+async function syncNow(forceFull) {
   if (!SY.user || !SY.key) return;
   if (SY.busy) { SY.again = true; return; }
   SY.busy = true; SY.again = false; setSync('sync');
   const c = SY.client; let changed = false;
   try {
     const seqRec = await DB.get('kv', 'sync_seq'); let seq = seqRec ? seqRec.v : 0;
+    // Repaso completo (al abrir, al pulsar «Sincronizar ahora» y cada 10 min): vuelve a mirar la lista entera
+    // por si algún cambio se coló mientras otro dispositivo subía a la vez. Solo descarga lo que de verdad falta.
+    const full = seqRec && (forceFull === true || Date.now() - SY.lastFull > 600000);
+    const seq0 = seq; if (full) seq = 0;
     if (!seqRec) {
       await dedupeCats();
       // Lo que ya había en este dispositivo antes de conectarse se sube (si choca con la nube, gana la nube)
@@ -1289,9 +1302,10 @@ async function syncNow() {
         const b = bodies[k]; if (!b) continue;
         await applyRemote(r.store, r.id, await decObj(b.data)); SY.meta[k] = { u: b.upd }; changed = true;
       }
-      seq = rows[rows.length - 1].seq; await RAW.put('kv', { k: 'sync_seq', v: seq });
+      seq = rows[rows.length - 1].seq; if (seq > seq0) await RAW.put('kv', { k: 'sync_seq', v: seq });
       if (rows.length < 500) break;
     }
+    if (full) SY.lastFull = Date.now();
     // 2) Subir lo pendiente
     const batch = [];
     const flush = async () => {
@@ -1329,11 +1343,12 @@ async function syncLoadMeta() {
   for (const x of Object.values(SY.meta)) if (x.u > SY.last) SY.last = x.u;
 }
 async function syncStart() {
-  const k = await DB.get('kv', 'sync_key'); if (!k || !SUPA_URL) return;
+  const k = await DB.get('kv', 'sync_key'); SY.ready = true;
+  if (!k || !SUPA_URL) return setSync(SY.status, SY.err);
   SY.key = k.v; SY.email = k.email || '';
   try { const c = await sbClient(); const { data } = await c.auth.getSession(); SY.user = data.session ? data.session.user : null; }
   catch (e) { setSync('error', 'Sin conexión: se sincronizará cuando vuelva internet.'); }
-  if (SY.user) syncNow(); else if (SY.client) setSync('error', 'La sesión ha caducado: vuelve a entrar.');
+  if (SY.user) syncNow(true); else if (SY.client) setSync('error', 'La sesión ha caducado: vuelve a entrar.');
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) syncNow(); });
 window.addEventListener('online', () => { if (!SY.user && SY.key) syncStart(); else syncNow(); });
@@ -1371,7 +1386,8 @@ function syncCard() {
     const st = SY.status === 'sync' ? '🔄 Sincronizando…' : SY.status === 'error' ? '⚠️ Con problemas' : SY.lastOk ? `✔ Al día · ${new Date(SY.lastOk).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}` : '…';
     return `<div class="card" id="syncCard"><h3>☁️ Sincronizar dispositivos</h3>
       <div class="row between"><span class="muted">Cuenta</span><b>${esc(SY.email || SY.user.email || '')}</b></div>
-      <div class="row between" style="margin-top:4px"><span class="muted">Estado</span><span>${st}</span></div>${err}
+      <div class="row between" style="margin-top:4px"><span class="muted">Estado</span><span>${st}</span></div>
+      <div class="row between" style="margin-top:4px"><span class="muted">En este dispositivo</span><span>${S.movs.length} movimientos · ${S.nominas.length} nóminas</span></div>${err}
       <div class="row" style="margin-top:12px;flex-wrap:wrap"><button class="btn sm" id="sySync">Sincronizar ahora</button><button class="btn sm ghost" id="syOut">Cerrar sesión</button></div>
       <p class="muted" style="margin:10px 0 0">Entra con esta misma cuenta en el móvil y en el ordenador y verás lo mismo en los dos. Todo viaja cifrado con tu contraseña.</p></div>`;
   }
@@ -1384,7 +1400,7 @@ function syncCard() {
 }
 function bindSync() {
   if ($('#syIn')) { $('#syIn').onclick = () => syncLogin(false); $('#syNew').onclick = () => syncLogin(true); }
-  if ($('#sySync')) { $('#sySync').onclick = () => syncNow(); $('#syOut').onclick = syncLogout; }
+  if ($('#sySync')) { $('#sySync').onclick = () => syncNow(true); $('#syOut').onclick = syncLogout; }
 }
 
 /* ====================== Arranque ====================== */

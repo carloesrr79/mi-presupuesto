@@ -1,4 +1,4 @@
-const CACHE = 'presupuesto-v8';
+const CACHE = 'presupuesto-v9';
 const SHELL = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png',
   'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'];
 self.addEventListener('install', e => {
